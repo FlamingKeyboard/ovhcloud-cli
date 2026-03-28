@@ -7,21 +7,16 @@ package config
 import (
 	"fmt"
 	"os"
-	"os/user"
+	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gopkg.in/ini.v1"
 )
 
 var (
-	ConfigPaths = []string{
-		// System wide configuration
-		"/etc/ovh.conf",
-		// Configuration in user's home
-		"~/.ovh.conf",
-		// Configuration in local folder
-		"./ovh.conf",
-	}
+	ConfigPaths = DefaultConfigPaths()
 
 	ConfigurableFields = map[string]string{
 		"endpoint":              "default",
@@ -29,43 +24,187 @@ var (
 	}
 )
 
+const windowsUserConfigPath = `%APPDATA%\ovhcloud\ovh.conf`
+
 // currentUserHome attempts to get current user's home directory.
 func currentUserHome() (string, error) {
-	usr, err := user.Current()
-	if err != nil {
-		// Fallback by trying to read $HOME
-		if userHome := os.Getenv("HOME"); userHome != "" {
-			return userHome, nil
-		}
-		return "", err
+	if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+		return userHome, nil
 	}
 
-	return usr.HomeDir, nil
+	for _, envName := range []string{"HOME", "USERPROFILE"} {
+		if userHome := os.Getenv(envName); userHome != "" {
+			return userHome, nil
+		}
+	}
+
+	if homeDrive := os.Getenv("HOMEDRIVE"); homeDrive != "" {
+		if homePath := os.Getenv("HOMEPATH"); homePath != "" {
+			return homeDrive + homePath, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to resolve current user home directory")
+}
+
+func currentUserConfigDir() (string, error) {
+	if configDir, err := os.UserConfigDir(); err == nil && configDir != "" {
+		return configDir, nil
+	}
+
+	if runtime.GOOS == "windows" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return appData, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to resolve current user config directory")
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	if path == "" {
+		return paths
+	}
+
+	for _, existing := range paths {
+		if existing == path {
+			return paths
+		}
+	}
+
+	return append(paths, path)
+}
+
+func joinPathFor(goos string, elements ...string) string {
+	if goos != "windows" {
+		return path.Join(elements...)
+	}
+
+	cleaned := make([]string, 0, len(elements))
+	for index, element := range elements {
+		if element == "" {
+			continue
+		}
+
+		element = strings.ReplaceAll(element, "/", `\`)
+		if index == 0 {
+			element = strings.TrimRight(element, `\`)
+		} else {
+			element = strings.Trim(element, `\`)
+		}
+
+		cleaned = append(cleaned, element)
+	}
+
+	if len(cleaned) == 0 {
+		return ""
+	}
+
+	if len(cleaned) == 1 {
+		return cleaned[0]
+	}
+
+	if cleaned[0] == "." {
+		return strings.Join(cleaned[1:], `\`)
+	}
+
+	return strings.Join(cleaned, `\`)
+}
+
+func defaultConfigPathsFor(goos string) []string {
+	switch goos {
+	case "windows":
+		return []string{
+			windowsUserConfigPath,
+			"~/.ovh.conf",
+			"./ovh.conf",
+		}
+	default:
+		return []string{
+			"/etc/ovh.conf",
+			"~/.ovh.conf",
+			"./ovh.conf",
+		}
+	}
+}
+
+func defaultConfigWritePathFor(goos, userHome, userConfigDir string) string {
+	switch goos {
+	case "windows":
+		if userConfigDir != "" {
+			return joinPathFor(goos, userConfigDir, "ovhcloud", "ovh.conf")
+		}
+		if userHome != "" {
+			return joinPathFor(goos, userHome, ".ovh.conf")
+		}
+	default:
+		return "/etc/ovh.conf"
+	}
+
+	return joinPathFor(goos, ".", "ovh.conf")
+}
+
+func DefaultConfigPaths() []string {
+	return defaultConfigPathsFor(runtime.GOOS)
+}
+
+func DefaultConfigWritePath() string {
+	userHome, _ := currentUserHome()
+	userConfigDir, _ := currentUserConfigDir()
+	return defaultConfigWritePathFor(runtime.GOOS, userHome, userConfigDir)
+}
+
+func prepareConfigWritePath(path string) (string, error) {
+	if path == "" {
+		path = DefaultConfigWritePath()
+	}
+
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+
+	return path, nil
+}
+
+func expandConfigPath(configPath, goos, userHome, userConfigDir string) string {
+	switch {
+	case configPath == windowsUserConfigPath:
+		if userConfigDir == "" {
+			return ""
+		}
+
+		return joinPathFor(goos, userConfigDir, "ovhcloud", "ovh.conf")
+	case strings.HasPrefix(configPath, "~/"), strings.HasPrefix(configPath, `~\`):
+		if userHome == "" {
+			return ""
+		}
+
+		return joinPathFor(goos, userHome, configPath[2:])
+	case strings.HasPrefix(configPath, "./"):
+		return configPath[2:]
+	case strings.HasPrefix(configPath, `.\\`):
+		return configPath[2:]
+	default:
+		return configPath
+	}
 }
 
 // configPaths returns configPaths, with ~/ prefix expanded.
 func ExpandConfigPaths() []string {
-	paths := []string{}
+	userHome, _ := currentUserHome()
+	userConfigDir, _ := currentUserConfigDir()
 
-	// Will be initialized on first use
-	var home string
-	var homeErr error
-
-	for _, path := range ConfigPaths {
-		if strings.HasPrefix(path, "~/") {
-			// Find home if needed
-			if home == "" && homeErr == nil {
-				home, homeErr = currentUserHome()
-			}
-			// Ignore file in HOME if we cannot find it
-			if homeErr != nil {
-				continue
-			}
-
-			path = home + path[1:]
+	paths := make([]string, 0, len(ConfigPaths))
+	for _, configPath := range ConfigPaths {
+		expandedPath := expandConfigPath(configPath, runtime.GOOS, userHome, userConfigDir)
+		if expandedPath == "" {
+			continue
 		}
 
-		paths = append(paths, path)
+		paths = append(paths, expandedPath)
 	}
 
 	return paths
@@ -130,8 +269,10 @@ func GetConfigValue(cfg *ini.File, sectionName, keyName string) (string, error) 
 }
 
 func SetConfigValue(cfg *ini.File, path, sectionName, keyName, value string) error {
-	if path == "" {
-		path = ConfigPaths[0]
+	var err error
+	path, err = prepareConfigWritePath(path)
+	if err != nil {
+		return err
 	}
 
 	if sectionName == "" {
@@ -140,8 +281,6 @@ func SetConfigValue(cfg *ini.File, path, sectionName, keyName, value string) err
 			return fmt.Errorf("unknown configuration field %q", keyName)
 		}
 	}
-
-	var err error
 
 	section := cfg.Section(sectionName)
 	if section == nil {
@@ -268,12 +407,13 @@ func ListProfiles(cfg *ini.File) []string {
 
 // SetActiveProfile sets the active profile in the [default] section.
 func SetActiveProfile(cfg *ini.File, path, profileName string) error {
-	if path == "" {
-		path = ConfigPaths[0]
+	var err error
+	path, err = prepareConfigWritePath(path)
+	if err != nil {
+		return err
 	}
 	section := cfg.Section("default")
 	if section == nil {
-		var err error
 		section, err = cfg.NewSection("default")
 		if err != nil {
 			return err
@@ -286,8 +426,10 @@ func SetActiveProfile(cfg *ini.File, path, profileName string) error {
 // DeleteProfile removes a profile section from the config. If the deleted profile
 // was the active one, the "profile" key is removed from [default] (falling back to legacy mode).
 func DeleteProfile(cfg *ini.File, path, profileName string) error {
-	if path == "" {
-		path = ConfigPaths[0]
+	var err error
+	path, err = prepareConfigWritePath(path)
+	if err != nil {
+		return err
 	}
 
 	sectionName := profileSectionPrefix + profileName
@@ -312,14 +454,15 @@ func DeleteProfile(cfg *ini.File, path, profileName string) error {
 // SetProfileConfigValue sets a configuration value in a profile section,
 // creating the section if it does not exist.
 func SetProfileConfigValue(cfg *ini.File, path, profileName, keyName, value string) error {
-	if path == "" {
-		path = ConfigPaths[0]
+	var err error
+	path, err = prepareConfigWritePath(path)
+	if err != nil {
+		return err
 	}
 
 	sectionName := profileSectionPrefix + profileName
 	section := cfg.Section(sectionName)
 	if section == nil {
-		var err error
 		section, err = cfg.NewSection(sectionName)
 		if err != nil {
 			return err

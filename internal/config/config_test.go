@@ -208,6 +208,59 @@ func TestSetProfileConfigValue_NewProfile(t *testing.T) {
 	td.Cmp(t, ListProfiles(cfg), td.Bag("newprofile"))
 }
 
+func TestDefaultConfigPathsForWindows(t *testing.T) {
+	paths := defaultConfigPathsFor("windows")
+
+	td.Cmp(t, paths, []string{
+		`%APPDATA%\ovhcloud\ovh.conf`,
+		`~/.ovh.conf`,
+		`./ovh.conf`,
+	})
+}
+
+func TestDefaultConfigPathsForUnix(t *testing.T) {
+	paths := defaultConfigPathsFor("linux")
+
+	td.Cmp(t, paths, []string{
+		"/etc/ovh.conf",
+		"~/.ovh.conf",
+		"./ovh.conf",
+	})
+}
+
+func TestExpandConfigPath_Windows(t *testing.T) {
+	td.Cmp(t, expandConfigPath(windowsUserConfigPath, "windows", `C:\Users\alice`, `C:\Users\alice\AppData\Roaming`), `C:\Users\alice\AppData\Roaming\ovhcloud\ovh.conf`)
+	td.Cmp(t, expandConfigPath(`~/.ovh.conf`, "windows", `C:\Users\alice`, `C:\Users\alice\AppData\Roaming`), `C:\Users\alice\.ovh.conf`)
+	td.Cmp(t, expandConfigPath(`./ovh.conf`, "windows", `C:\Users\alice`, `C:\Users\alice\AppData\Roaming`), `ovh.conf`)
+}
+
+func TestExpandConfigPath_Unix(t *testing.T) {
+	td.Cmp(t, expandConfigPath("/etc/ovh.conf", "linux", "/home/alice", ""), "/etc/ovh.conf")
+	td.Cmp(t, expandConfigPath(`~/.ovh.conf`, "linux", "/home/alice", ""), "/home/alice/.ovh.conf")
+	td.Cmp(t, expandConfigPath(`./ovh.conf`, "linux", "/home/alice", ""), "ovh.conf")
+}
+
+func TestDefaultConfigWritePathForWindows(t *testing.T) {
+	path := defaultConfigWritePathFor("windows", `C:\Users\alice`, `C:\Users\alice\AppData\Roaming`)
+
+	td.Cmp(t, path, `C:\Users\alice\AppData\Roaming\ovhcloud\ovh.conf`)
+}
+
+func TestDefaultConfigWritePathForUnix(t *testing.T) {
+	path := defaultConfigWritePathFor("linux", "/home/alice", "")
+
+	td.Cmp(t, path, "/etc/ovh.conf")
+}
+
+func TestSetProfileConfigValue_CreatesParentDirectory(t *testing.T) {
+	cfg := ini.Empty()
+	tmpFile := filepath.Join(t.TempDir(), "nested", "dir", "test.conf")
+
+	td.Require(t).CmpNoError(SetProfileConfigValue(cfg, tmpFile, "newprofile", "endpoint", "ovh-eu"))
+	_, err := os.Stat(tmpFile)
+	td.Require(t).CmpNoError(err)
+}
+
 func TestGetConfigValue_ProfileMode(t *testing.T) {
 	cfg := newTestConfig(`
 [default]

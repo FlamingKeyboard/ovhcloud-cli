@@ -36,8 +36,16 @@
 
 To install the OVHcloud CLI, you can use the following command:
 
+On Linux and macOS:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ovh/ovhcloud-cli/main/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/ovh/ovhcloud-cli/main/install.ps1 | iex
 ```
 
 ## Binary download
